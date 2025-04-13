@@ -1,111 +1,54 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
-
-const DATA_PATH = path.join(__dirname, 'bossDeaths.json');
+const db = require('./utils/db');
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
-
-const bossConfigs = {
-  qa: { timer: 24 * 60 * 60 * 1000, window: 4 },
-  core: { timer: 48 * 60 * 60 * 1000, window: 4 },
-  orfen: { timer: 33 * 60 * 60 * 1000, window: 4 },
-  zaken: { timer: 45 * 60 * 60 * 1000, window: 4 },
-  baium: { timer: 125 * 60 * 60 * 1000, window: 4 },
-  antharas: { timer: 192 * 60 * 60 * 1000, window: 4 },
-  valakas: { timer: 264 * 60 * 60 * 1000, window: 4 },
-  cabrio: { timer: 12 * 60 * 60 * 1000, window: 9 },
-  hallate: { timer: 12 * 60 * 60 * 1000, window: 9 },
-  kernon: { timer: 12 * 60 * 60 * 1000, window: 9 },
-  golkonda: { timer: 12 * 60 * 60 * 1000, window: 9 },
-};
-
-// Load bossDeaths from file if exists
-let bossDeaths = {};
-if (fs.existsSync(DATA_PATH)) {
-  try {
-    const raw = fs.readFileSync(DATA_PATH);
-    const parsed = JSON.parse(raw);
-    // Convert ISO strings to Date objects
-    for (const boss in parsed) {
-      parsed[boss].time = new Date(parsed[boss].time);
-    }
-    bossDeaths = parsed;
-    console.log('Boss death data loaded.');
-  } catch (err) {
-    console.error('Failed to load saved boss data:', err);
-  }
-}
-
-// Save bossDeaths to file
-function saveBossDeaths() {
-  try {
-    fs.writeFileSync(DATA_PATH, JSON.stringify(bossDeaths, null, 2));
-  } catch (err) {
-    console.error('Failed to save boss death data:', err);
-  }
-}
 
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
 client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot) return;
+  if (message.author.bot || !message.guild) return;
 
   const content = message.content.trim();
   const args = content.split(/\s+/);
   const command = args.shift().toLowerCase();
+  const serverId = message.guild.id;
 
   // !dead <boss>
   if (command === "!dead") {
     const boss = args[0]?.toLowerCase();
-    const config = bossConfigs[boss];
-    if (!config) {
+    const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1', [boss]);
+    if (catalog.rowCount === 0) {
       return message.reply("Unknown boss. Please use a valid name.");
     }
 
     const now = new Date();
-    bossDeaths[boss] = {
-      time: now,
-      user: message.author.username,
-    };
+    const user = message.author.username;
 
-    saveBossDeaths();
+    await db.query(`
+      INSERT INTO raid_boss (raid_name, server_id, death_time, user_name)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (raid_name, server_id)
+      DO UPDATE SET death_time = $3, user_name = $4, updated_at = NOW()
+    `, [boss, serverId, now, user]);
 
-    const respawnStart = new Date(now.getTime() + config.timer);
+    const respawnStart = new Date(now.getTime() + catalog.rows[0].timer_ms);
+
     return message.reply(
       `${capitalize(boss)} marked as dead at <t:${Math.floor(now.getTime() / 1000)}:F>, respawn window will start at <t:${Math.floor(respawnStart.getTime() / 1000)}:F>.`
     );
-  }
-
-  // !tracked
-  if (command === '!tracked') {
-    if (Object.keys(bossDeaths).length === 0) {
-      return message.reply("No bosses are being tracked yet.");
-    }
-
-    let reply = "**Tracked Bosses:**\n";
-    for (const [boss, data] of Object.entries(bossDeaths)) {
-      const config = bossConfigs[boss];
-      const deathTime = `<t:${Math.floor(new Date(data.time).getTime() / 1000)}:F>`;
-      const respawnStart = `<t:${Math.floor(new Date(data.time).getTime() / 1000 + config.timer / 1000)}:F>`;
-      reply += `**${capitalize(boss)}** - Died at ${deathTime}, respawn starts at ${respawnStart}. Updated by ${data.user}\n`;
-    }
-
-    return message.reply(reply);
   }
 
   // !update <boss> <YYYY-MM-DD HH:MM>
   if (command === '!update') {
     const boss = args[0]?.toLowerCase();
     const dateString = args.slice(1).join(" ");
-    const config = bossConfigs[boss];
-
-    if (!boss || !config) {
+    const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1', [boss]);
+    if (!boss || catalog.rowCount === 0) {
       return message.reply("Unknown boss. Use a valid boss name.");
     }
 
@@ -114,47 +57,83 @@ client.on(Events.MessageCreate, async (message) => {
       return message.reply("Invalid date/time format. Use something like `!update core 2025-04-12 15:45`");
     }
 
-    bossDeaths[boss] = {
-      time: newTime,
-      user: message.author.username,
-    };
+    const user = message.author.username;
 
-    saveBossDeaths();
+    await db.query(`
+      INSERT INTO raid_boss (raid_name, server_id, death_time, user_name)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (raid_name, server_id)
+      DO UPDATE SET death_time = $3, user_name = $4, updated_at = NOW()
+    `, [boss, serverId, newTime, user]);
 
-    const respawnStart = new Date(newTime.getTime() + config.timer);
+    const respawnStart = new Date(newTime.getTime() + catalog.rows[0].timer_ms);
+
     return message.reply(
       `${capitalize(boss)} updated: death time set to <t:${Math.floor(newTime.getTime() / 1000)}:F>, respawn starts at <t:${Math.floor(respawnStart.getTime() / 1000)}:F>.`
     );
   }
 
-  // !<boss>
+  // !rb — tracked bosses
+  if (command === '!rb') {
+    const tracked = await db.query(`
+      SELECT rb.*, c.timer_ms, c.window_hours
+      FROM raid_boss rb
+      JOIN raid_boss_catalog c ON rb.raid_name = c.raid_name
+      WHERE rb.server_id = $1
+    `, [serverId]);
+
+    if (tracked.rowCount === 0) {
+      return message.reply("No bosses are being tracked yet on this server.");
+    }
+
+    let reply = "**RaidBosses respawn times:**\n\n";
+    tracked.rows.forEach(row => {
+      const deathTime = `<t:${Math.floor(new Date(row.death_time).getTime() / 1000)}:F>`;
+      const respawnStart = new Date(new Date(row.death_time).getTime() + row.timer_ms);
+      const formattedRespawn = `<t:${Math.floor(respawnStart.getTime() / 1000)}:F>`;
+      reply += `• **${capitalize(row.raid_name)}** - Died at ${deathTime}, respawn starts at ${formattedRespawn}. Updated by ${row.user_name}\n`;
+    });
+
+    return message.reply(reply);
+  }
+
+  // !<boss> — get boss window
   const boss = command.replace("!", "").toLowerCase();
-  const config = bossConfigs[boss];
-  if (config) {
-    const deathInfo = bossDeaths[boss];
-    if (!deathInfo) {
-      return message.reply(`No death record found for ${capitalize(boss)}.`);
+  const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1', [boss]);
+
+  if (catalog.rowCount > 0) {
+    const result = await db.query(`
+      SELECT * FROM raid_boss
+      WHERE raid_name = $1 AND server_id = $2
+    `, [boss, serverId]);
+
+    if (result.rowCount === 0) {
+      return message.reply(`No death record found for ${capitalize(boss)} on this server.`);
     }
 
-    const respawnStart = new Date(deathInfo.time.getTime() + config.timer);
+    const deathInfo = result.rows[0];
+    const { timer_ms, window_hours } = catalog.rows[0];
+    const deathTime = new Date(deathInfo.death_time);
+    const respawnStart = new Date(deathTime.getTime() + timer_ms);
+    const respawnEnd = new Date(respawnStart.getTime() + window_hours * 60 * 60 * 1000);
     const now = new Date();
-    const windowHours = config.window;
-    const respawnEnd = new Date(respawnStart.getTime() + windowHours * 60 * 60 * 1000);
 
-    let statusMessage = '';
-    if (now < respawnStart) {
-      statusMessage = `${capitalize(boss)} window starts at <t:${Math.floor(respawnStart.getTime() / 1000)}:F> and will last for ${windowHours} hours. Last updated by ${deathInfo.user}.`;
-    } else if (now >= respawnStart && now <= respawnEnd) {
-      const timeLeftMs = respawnEnd.getTime() - now.getTime();
-      const minutes = Math.floor((timeLeftMs / 1000) / 60);
-      const hours = Math.floor(minutes / 60);
-      const remaining = `${hours} hour${hours !== 1 ? 's' : ''} and ${minutes % 60} minute${(minutes % 60 !== 1 ? 's' : '')}`;
-      statusMessage = `${capitalize(boss)} window is currently OPEN. ${remaining} left. Last updated by ${deathInfo.user}.`;
+    if (now >= respawnStart && now <= respawnEnd) {
+      const minutesLeft = Math.floor((respawnEnd - now) / 60000);
+      const hours = Math.floor(minutesLeft / 60);
+      const mins = minutesLeft % 60;
+      return message.reply(
+        `**${capitalize(boss)} is currently within its spawn window!**\nRemaining time: ${hours}h ${mins}m.\nLast updated by ${deathInfo.user_name}.`
+      );
+    } else if (now < respawnStart) {
+      return message.reply(
+        `${capitalize(boss)} window starts at <t:${Math.floor(respawnStart.getTime() / 1000)}:F> and will last for ${window_hours} hours. Last updated by ${deathInfo.user_name}.`
+      );
     } else {
-      statusMessage = `${capitalize(boss)} window has ended. Last updated by ${deathInfo.user}.`;
+      return message.reply(
+        `${capitalize(boss)} window has ended. Last updated by ${deathInfo.user_name}.`
+      );
     }
-
-    return message.reply(statusMessage);
   }
 });
 
