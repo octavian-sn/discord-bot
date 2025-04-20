@@ -88,10 +88,9 @@ client.on(Events.MessageCreate, async (message) => {
 
     let reply = "**RaidBosses respawn times:**\n\n";
     tracked.rows.forEach(row => {
-      const deathTime = `<t:${Math.floor(new Date(row.death_time).getTime() / 1000)}:F>`;
       const respawnStart = new Date(new Date(row.death_time).getTime() + row.timer_ms);
       const formattedRespawn = `<t:${Math.floor(respawnStart.getTime() / 1000)}:F>`;
-      reply += `• **${capitalize(row.raid_name)}** - Died at ${deathTime}, respawn starts at ${formattedRespawn}. Updated by ${row.user_name}\n`;
+      reply += `• **${capitalize(row.raid_name)}** -${formattedRespawn}\n`;
     });
 
     return message.reply(reply);
@@ -135,6 +134,42 @@ client.on(Events.MessageCreate, async (message) => {
       );
     }
   }
+
+  // !help — list of available commands
+  if (command === '!help') {
+    let reply = `
+•  !rb - Lists all currently tracked bosses
+•  !{boss_name} - Check the spawn time of a boss (Example: !baium)
+•  !dead {boss_name} - Mark a boss as dead (Example: !dead antharas)
+•  !update {boss_name} YYYY-MM-DD HH:MM - Update a boss death time in **UTC-0** format (Example: !update golkonda 2025-04-12 18:30)
+•  !list - Returns a list with bosses that can be tracked.
+
+All tracked times are:
+**Localized to your Discord’s local time**
+Labeled with who last updated them
+`;
+    return message.reply(reply)
+  }
+
+  // !list - list of bosses that the bot can track
+  if(command === '!list'){
+    const results = await db.query(`
+      SELECT rb.raid_name, rb.window_hours
+      FROM raid_boss_catalog rb
+    `)
+
+    if (results.rowCount === 0){
+      return message.reply("No raid boss information currently available.")
+    }
+
+    let reply = "**The following raid bosses can be tracked:**\n\n" 
+    results.rows.forEach(row=>{
+      reply += `• ${capitalize(row.raid_name)} - ${row.window_hours} hours spawn window \n`
+    })
+    
+    return message.reply(reply)
+  }
+
 });
 
 client.login(process.env.DISCORD_TOKEN);
