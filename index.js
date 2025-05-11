@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Events } = require('discord.js');
+const { Client, GatewayIntentBits, Events, PermissionsBitField } = require('discord.js');
 const db = require('./utils/db');
 
 const client = new Client({
@@ -74,16 +74,32 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // !rb — tracked bosses
-  if (command === '!rb') {
+  switch(command){
+    case '!rb': 
+      return returnTrackedBosses(message, 'regular');
+    case '!epic': 
+      return returnTrackedBosses(message, 'epic');
+    case '!sub': 
+       return returnTrackedBosses(message, 'subclass');
+  }
+
+  async function returnTrackedBosses(message, type) {
+    const serverId = message.guild.id
+
     const tracked = await db.query(`
       SELECT rb.*, c.timer_ms, c.window_hours
       FROM raid_boss rb
       JOIN raid_boss_catalog c ON rb.raid_name = c.raid_name
       WHERE rb.server_id = $1
-    `, [serverId]);
+        AND c.type = $2
+        AND NOW() < 
+          death_time 
+          + (c.timer_ms * INTERVAL '1 millisecond')
+          + (c.window_hours * INTERVAL '1 hour');
+    `, [serverId, type]);
 
     if (tracked.rowCount === 0) {
-      return message.reply("No bosses are being tracked yet on this server.");
+      return message.reply("All tracked raid bosses are currently outdated or no bosses are being tracked yet on this server.");
     }
 
     let reply = "**RaidBosses respawn times:**\n\n";
@@ -94,6 +110,67 @@ client.on(Events.MessageCreate, async (message) => {
     });
 
     return message.reply(reply);
+  }
+
+  if (command === '!rbadd'){
+    const [bossName, type, respawnTime, respawnWindow] = args;
+    const user = message.author.username;
+
+    if (!bossName) {
+     return message.reply("Usage: !rbadd {bossName} {type} {respawnTimeHours} {windowHours}\nExample: !rbadd tezza epic 72 4");
+    }
+    const lowerCaseBossName = bossName.toLocaleLowerCase()
+
+    if (type && (type !== 'epic' && type !== 'subclass' && type !== 'regular')) {
+      return message.reply(`Invalid type. Must be either epic or subclass.`);
+    }
+    if (type && (!respawnTime || !respawnWindow)){
+      return message.reply('For epic and subclass bosses a respawn time and window must be provided. \nExample: !rbadd tezza epic 72 4')
+    }
+    if (respawnTime < 1 || respawnTime > 999 || respawnWindow < 1 || respawnWindow > 9) {
+      return message.reply("Respawn time must be between 1 and 999. Window hours must be between 1 and 9.")
+    }
+
+    try{
+      return await addNewRaidBoss(lowerCaseBossName, type, respawnTime, respawnWindow, user);
+    }catch(e){
+      return message.reply(`There was an issue adding a new rb to the list of tracked raid bosses: ${e.message}`)
+    }
+  }
+
+  async function addNewRaidBoss(bossName, type = 'regular', respawnTime = 12, respawnWindow = 9, added_by){
+    const respawnTimeMs = respawnTime * 60 * 60 * 1000
+
+    await db.query(`
+      INSERT INTO raid_boss_catalog (raid_name, type, timer_ms, window_hours, added_by)
+      VALUES ($1, $2, $3, $4, $5)
+    `, [bossName, type, respawnTimeMs, respawnWindow, added_by])
+
+    return message.reply(
+      `${capitalize(bossName)} (${respawnTime}h + ${respawnWindow}h random) has been added to the ${type !== 'regular' ? type : ''} list.`
+    )
+  }
+
+  if(command === '!rbremove'){
+    if(!message.member.permissions.has(PermissionsBitField.Flags.Administrator)){
+      return message.reply(`This command is only available for admins.`)
+    }
+
+    try{
+      const raidName = args[0].toLocaleLowerCase()
+      const result = await db.query(`
+        DELETE FROM raid_boss_catalog
+        WHERE raid_name = $1;
+      `, [raidName])
+  
+      if (result.rowCount === 0){
+        return message.reply(`Unknown boss name. Use !list to check the currently tracked bosses.`)
+      }
+      return message.reply(`${raidName} has been removed from the list.`)
+
+    }catch(e){
+      return message.reply(`There was an issue removing the rb from the tracked list: ${e.message}`)
+    }
   }
 
   // !<boss> — get boss window
@@ -130,26 +207,33 @@ client.on(Events.MessageCreate, async (message) => {
       );
     } else {
       return message.reply(
-        `${capitalize(boss)} window has ended. Last updated by ${deathInfo.user_name}.`
+        `${capitalize(boss)} window has ended <t:${Math.floor(respawnEnd.getTime() / 1000)}:F>. Last updated by ${deathInfo.user_name}.`
       );
     }
   }
 
   // !help — list of available commands
-  if (command === '!help') {
-    let reply = `
-•  !rb - Lists all currently tracked bosses
-•  !{boss_name} - Check the spawn time of a boss (Example: !baium)
-•  !dead {boss_name} - Mark a boss as dead (Example: !dead antharas)
-•  !update {boss_name} YYYY-MM-DD HH:MM - Update a boss death time in **UTC-0** format (Example: !update golkonda 2025-04-12 18:30)
-•  !list - Returns a list with bosses that can be tracked.
+if (command === '!help') {
+  let reply = `
+**Raid Bot Commands:**
+
+•  \`!rb\` - Lists all tracked **regular** bosses on your server *(only shows those within or approaching their spawn window)*
+•  \`!epic\` - Lists all tracked **epic** bosses *(same)*
+•  \`!sub\` - Lists all tracked **subclass** bosses *(same; baium and barakiel are listed here)*
+•  \`!{boss_name}\` - Check the spawn window of a specific boss (Example: \`!baium\`)
+•  \`!dead {boss_name}\` - Mark a boss as dead (Example: \`!dead antharas\`)
+•  \`!update {boss_name} YYYY-MM-DD HH:MM\` - Update a boss death time in **UTC-0** (Example: \`!update golkonda 2025-04-12 18:30\`)
+•  \`!list\` - Returns a list of all bosses that can be tracked
+•  \`!rbadd {bossName} {type} {respawnTimeHours} {windowHours}\` - Add a new boss (type, respawn and window are mandatory for epic/subclass only)
+•  \`!rbremove {bossName}\` - Remove a boss from the list (**admin only**)
 
 All tracked times are:
-**Localized to your Discord’s local time**
-Labeled with who last updated them
+•  **Localized to your Discord’s local time**
+•  Labeled with who last updated them
 `;
-    return message.reply(reply)
-  }
+
+  return message.reply(reply);
+}
 
   // !list - list of bosses that the bot can track
   if(command === '!list'){
