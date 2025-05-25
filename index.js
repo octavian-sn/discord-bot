@@ -74,19 +74,8 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // !rb — tracked bosses
-  switch(command){
-    case '!rb': 
-      return returnTrackedBosses(message, 'regular');
-    case '!epic': 
-      return returnTrackedBosses(message, 'epic');
-    case '!sub': 
-       return returnTrackedBosses(message, 'subclass');
-  }
-
-  async function returnTrackedBosses(message, type) {
-    const serverId = message.guild.id
-
-    const tracked = await db.query(`
+  if (command === '!rb') {
+     const tracked = await db.query(`
       SELECT rb.*, c.timer_ms, c.window_hours
       FROM raid_boss rb
       JOIN raid_boss_catalog c ON rb.raid_name = c.raid_name
@@ -96,17 +85,60 @@ client.on(Events.MessageCreate, async (message) => {
           death_time 
           + (c.timer_ms * INTERVAL '1 millisecond')
           + (c.window_hours * INTERVAL '1 hour');
-    `, [serverId, type]);
+    `, [serverId, 'regular']);
 
     if (tracked.rowCount === 0) {
       return message.reply("All tracked raid bosses are currently outdated or no bosses are being tracked yet on this server.");
     }
 
-    let reply = "**RaidBosses respawn times:**\n\n";
+    let reply = "**REGULAR raid bosses respawn times:**\n\n";
     tracked.rows.forEach(row => {
-      const respawnStart = new Date(new Date(row.death_time).getTime() + row.timer_ms);
+      const respawnStart = new Date(row.death_time.getTime() + row.timer_ms);
       const formattedRespawn = `<t:${Math.floor(respawnStart.getTime() / 1000)}:F>`;
-      reply += `• **${capitalize(row.raid_name)}** -${formattedRespawn}\n`;
+      reply += `• **${capitalize(row.raid_name)}** - ${formattedRespawn}\n`;
+    });
+
+    return message.reply(reply);
+  }
+
+  // !epic/!sub — tracked bosses
+  switch(command){
+    case '!epic': 
+      return returnTrackedBosses(message, 'epic');
+    case '!sub': 
+       return returnTrackedBosses(message, 'subclass');
+  }
+
+  async function returnTrackedBosses(message, type) {
+    const tracked = await db.query(`
+      SELECT rb.*, c.timer_ms, c.window_hours
+      FROM raid_boss rb
+      JOIN raid_boss_catalog c ON rb.raid_name = c.raid_name
+      WHERE rb.server_id = $1
+      AND c.type = $2
+    `, [serverId, type]);
+
+    if (tracked.rowCount === 0) {
+      return message.reply("No bosses are being tracked yet on this server.");
+    }
+
+    let reply = `**${type.toUpperCase()} raid bosses respawn time:**\n\n`;
+    tracked.rows.forEach(row => {
+      const respawnStart = new Date(row.death_time.getTime() + row.timer_ms);
+      const respawnEnd = new Date(respawnStart.getTime() + row.window_hours * 60 * 60 * 1000);
+      const now = new Date();
+      const formattedStart = `<t:${Math.floor(respawnStart.getTime() / 1000)}:F>`;
+      const formattedEnd = `<t:${Math.floor(respawnEnd.getTime() / 1000)}:F>`;
+      if(now > respawnEnd){
+        reply += `• **${capitalize(row.raid_name)}** - ended ${formattedEnd}\n`;
+      } else if(respawnStart <= now && now <= respawnEnd){
+        const minutesLeft = Math.floor((respawnEnd - now) / 60000);
+        const hours = Math.floor(minutesLeft / 60);
+        const mins = minutesLeft % 60;
+        reply += `• **${capitalize(row.raid_name)}** - ON! Window ends in ${hours}h ${mins}m\n`;
+      } else{
+        reply += `• **${capitalize(row.raid_name)}** - starts ${formattedStart}\n`;
+      }
     });
 
     return message.reply(reply);
@@ -261,3 +293,5 @@ client.login(process.env.DISCORD_TOKEN);
 function capitalize(str) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
+
+
