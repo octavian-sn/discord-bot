@@ -39,7 +39,7 @@ client.on(Events.MessageCreate, async (message) => {
     const respawnStart = new Date(now.getTime() + catalog.rows[0].timer_ms);
 
     return message.reply(
-      `${capitalize(boss)} marked as dead at <t:${Math.floor(now.getTime() / 1000)}:F>, respawn window will start at <t:${Math.floor(respawnStart.getTime() / 1000)}:F>.`
+      `${capitalize(boss)} updated. TOD: <t:${Math.floor(now.getTime() / 1000)}:F>, window start: <t:${Math.floor(respawnStart.getTime() / 1000)}:F>`
     );
   }
 
@@ -69,7 +69,7 @@ client.on(Events.MessageCreate, async (message) => {
     const respawnStart = new Date(newTime.getTime() + catalog.rows[0].timer_ms);
 
     return message.reply(
-      `${capitalize(boss)} updated: death time set to <t:${Math.floor(newTime.getTime() / 1000)}:F>, respawn starts at <t:${Math.floor(respawnStart.getTime() / 1000)}:F>.`
+      `${capitalize(boss)} updated. TOD: <t:${Math.floor(newTime.getTime() / 1000)}:F>, window start: <t:${Math.floor(respawnStart.getTime() / 1000)}:F>.`
     );
   }
 
@@ -88,7 +88,7 @@ client.on(Events.MessageCreate, async (message) => {
     `, [serverId, 'regular']);
 
     if (tracked.rowCount === 0) {
-      return message.reply("All tracked raid bosses are currently outdated or no bosses are being tracked yet on this server.");
+      return message.reply("All REGULAR raid bosses are currently outdated.");
     }
 
     let reply = "**REGULAR raid bosses respawn times:**\n\n";
@@ -119,10 +119,10 @@ client.on(Events.MessageCreate, async (message) => {
     `, [serverId, type]);
 
     if (tracked.rowCount === 0) {
-      return message.reply("No bosses are being tracked yet on this server.");
+      return message.reply(`No ${type} bosses are being tracked yet. Use '!dead' to update timers or '!rbadd' to update the list.`);
     }
 
-    let reply = `**${type.toUpperCase()} raid bosses respawn time:**\n\n`;
+    let reply = `**${type.toUpperCase()}:**\n\n`;
     tracked.rows.forEach(row => {
       const respawnStart = new Date(row.death_time.getTime() + row.timer_ms);
       const respawnEnd = new Date(respawnStart.getTime() + row.window_hours * 60 * 60 * 1000);
@@ -216,7 +216,7 @@ client.on(Events.MessageCreate, async (message) => {
     `, [boss, serverId]);
 
     if (result.rowCount === 0) {
-      return message.reply(`No death record found for ${capitalize(boss)} on this server.`);
+      return message.reply(`No death record found for ${capitalize(boss)}.`);
     }
 
     const deathInfo = result.rows[0];
@@ -231,15 +231,15 @@ client.on(Events.MessageCreate, async (message) => {
       const hours = Math.floor(minutesLeft / 60);
       const mins = minutesLeft % 60;
       return message.reply(
-        `**${capitalize(boss)} is currently within its spawn window!**\nRemaining time: ${hours}h ${mins}m.\nLast updated by ${deathInfo.user_name}.`
+        `**${capitalize(boss)} is currently within spawn window!**\nRemaining time: ${hours}h ${mins}m.\nU: ${deathInfo.user_name}.`
       );
     } else if (now < respawnStart) {
       return message.reply(
-        `${capitalize(boss)} window starts at <t:${Math.floor(respawnStart.getTime() / 1000)}:F> and will last for ${window_hours} hours. Last updated by ${deathInfo.user_name}.`
+        `${capitalize(boss)} window starts <t:${Math.floor(respawnStart.getTime() / 1000)}:F> (+${window_hours} random). U: ${deathInfo.user_name}.`
       );
     } else {
       return message.reply(
-        `${capitalize(boss)} window has ended <t:${Math.floor(respawnEnd.getTime() / 1000)}:F>. Last updated by ${deathInfo.user_name}.`
+        `${capitalize(boss)} TOD: <t:${Math.floor(respawnEnd.getTime() / 1000)}:F>. U: ${deathInfo.user_name}.`
       );
     }
   }
@@ -272,15 +272,16 @@ All tracked times are:
     const results = await db.query(`
       SELECT rb.raid_name, rb.window_hours
       FROM raid_boss_catalog rb
+      ORDER BY raid_name
     `)
 
     if (results.rowCount === 0){
       return message.reply("No raid boss information currently available.")
     }
 
-    let reply = "**The following raid bosses can be tracked:**\n\n" 
+    let reply = "**Raid Boss list (Name - x hours respawn window)**\n\n" 
     results.rows.forEach(row=>{
-      reply += `• ${capitalize(row.raid_name)} - ${row.window_hours} hours spawn window \n`
+      reply += `• ${capitalize(row.raid_name)} - ${row.window_hours}\n`
     })
     
     return message.reply(reply)
