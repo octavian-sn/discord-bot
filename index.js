@@ -21,7 +21,7 @@ client.on(Events.MessageCreate, async (message) => {
   // !dead <boss>
   if (command === "!dead") {
     const boss = args[0]?.toLowerCase();
-    const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1', [boss]);
+    const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1 AND server_id = $2', [boss, serverId]);
     if (catalog.rowCount === 0) {
       return message.reply("Unknown boss. Please use a valid name.");
     }
@@ -47,7 +47,7 @@ client.on(Events.MessageCreate, async (message) => {
   if (command === '!update') {
     const boss = args[0]?.toLowerCase();
     const dateString = args.slice(1).join(" ");
-    const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1', [boss]);
+    const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1 AND server_id = $2', [boss, serverId]);
     if (!boss || catalog.rowCount === 0) {
       return message.reply("Unknown boss. Use a valid boss name.");
     }
@@ -73,56 +73,29 @@ client.on(Events.MessageCreate, async (message) => {
     );
   }
 
-  // !rb — tracked bosses
-  if (command === '!rb') {
-     const tracked = await db.query(`
-      SELECT rb.*, c.timer_ms, c.window_hours
-      FROM raid_boss rb
-      JOIN raid_boss_catalog c ON rb.raid_name = c.raid_name
-      WHERE rb.server_id = $1
-        AND c.type = $2
-        AND NOW() < 
-          death_time 
-          + (c.timer_ms * INTERVAL '1 millisecond')
-          + (c.window_hours * INTERVAL '1 hour');
-    `, [serverId, 'regular']);
-
-    if (tracked.rowCount === 0) {
-      return message.reply("All REGULAR raid bosses are currently outdated.");
-    }
-
-    let reply = "**REGULAR raid bosses respawn times:**\n\n";
-    tracked.rows.forEach(row => {
-      const respawnStart = new Date(row.death_time.getTime() + row.timer_ms);
-      const formattedRespawn = `<t:${Math.floor(respawnStart.getTime() / 1000)}:F>`;
-      reply += `• **${capitalize(row.raid_name)}** - ${formattedRespawn}\n`;
-    });
-
-    return message.reply(reply);
-  }
-
-  // !epic/!sub — tracked bosses
+  // !epic/!sub/!rb — tracked bosses
   switch(command){
     case '!epic': 
       return returnTrackedBosses(message, 'epic');
     case '!sub': 
-       return returnTrackedBosses(message, 'subclass');
+      return returnTrackedBosses(message, 'subclass');
+    case '!rb':
+      return returnTrackedBosses(message, 'regular')
   }
 
   async function returnTrackedBosses(message, type) {
-    const tracked = await db.query(`
-      SELECT rb.*, c.timer_ms, c.window_hours
-      FROM raid_boss rb
-      JOIN raid_boss_catalog c ON rb.raid_name = c.raid_name
-      WHERE rb.server_id = $1
-      AND c.type = $2
-    `, [serverId, type]);
+    const tracked = await getTrackedBosses(serverId, { 
+      isRegular : type === 'regular',
+      isEpic : type === 'epic', 
+      isSubclass : type === 'subclass'
+    });
 
     if (tracked.rowCount === 0) {
       return message.reply(`No ${type} bosses are being tracked yet. Use '!dead' to update timers or '!rbadd' to update the list.`);
     }
 
     let reply = `**${type.toUpperCase()}:**\n\n`;
+    let outdatedBosses = '';
     tracked.rows.forEach(row => {
       const respawnStart = new Date(row.death_time.getTime() + row.timer_ms);
       const respawnEnd = new Date(respawnStart.getTime() + row.window_hours * 60 * 60 * 1000);
@@ -130,7 +103,7 @@ client.on(Events.MessageCreate, async (message) => {
       const formattedStart = `<t:${Math.floor(respawnStart.getTime() / 1000)}:F>`;
       const formattedEnd = `<t:${Math.floor(respawnEnd.getTime() / 1000)}:F>`;
       if(now > respawnEnd){
-        reply += `• **${capitalize(row.raid_name)}** - ended ${formattedEnd}\n`;
+        outdatedBosses += `• **${capitalize(row.raid_name)}** - ended ${formattedEnd}\n`;
       } else if(respawnStart <= now && now <= respawnEnd){
         const minutesLeft = Math.floor((respawnEnd - now) / 60000);
         const hours = Math.floor(minutesLeft / 60);
@@ -141,9 +114,46 @@ client.on(Events.MessageCreate, async (message) => {
       }
     });
 
-    return message.reply(reply);
+    return message.reply( reply + outdatedBosses );
   }
 
+  async function getTrackedBosses(serverId, {isRegular = false, isEpic = false, isSubclass = false} = {}){
+    let query = `
+    SELECT rb.*, c.timer_ms, c.window_hours
+    FROM raid_boss rb
+    JOIN raid_boss_catalog c 
+    ON rb.raid_name = c.raid_name
+    AND rb.server_id = c.server_id
+    WHERE rb.server_id = $1
+    `
+    const values = [serverId]
+
+    if (isRegular){
+      query += ` 
+        AND c.is_regular IS TRUE
+        AND NOW() < 
+          death_time 
+          + (c.timer_ms * INTERVAL '1 millisecond')
+          + (c.window_hours * INTERVAL '1 hour')
+      `;
+    }
+    if (isEpic){
+      query += ` AND c.is_epic IS TRUE`
+    }
+    if (isSubclass){
+      query += ` AND c.is_subclass IS TRUE`
+    }
+
+    query += ` 
+      ORDER BY
+        (death_time
+        + (c.timer_ms * INTERVAL '1 millisecond')
+        + (c.window_hours * INTERVAL '1 hour')) - NOW();
+    `
+    return db.query(query, values)
+  }
+
+  // !rbadd - add bosses
   if (command === '!rbadd'){
     const [bossName, type, respawnTime, respawnWindow] = args;
     const user = message.author.username;
@@ -164,25 +174,48 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     try{
+      await addNewServer(serverId);
       return await addNewRaidBoss(lowerCaseBossName, type, respawnTime, respawnWindow, user);
     }catch(e){
+      if(e.message.includes('duplicate key value')){
+        return message.reply(`Duplicate entry detected. ${bossName} already exists.`)
+      }
       return message.reply(`There was an issue adding a new rb to the list of tracked raid bosses: ${e.message}`)
+    }
+  }
+
+  async function addNewServer(serverId){
+    const serverName = message.guild.name;
+    const ownerId = (await message.guild.fetchOwner()).id;
+
+    const result = await db.query(`
+      INSERT INTO servers (server_id, name, owner_id)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (server_id) DO NOTHING
+    `, [serverId, serverName, ownerId])
+
+    if (result.rowCount > 0){
+      console.info(`New server ${serverId} has been added. O: ${ownerId}`)
     }
   }
 
   async function addNewRaidBoss(bossName, type = 'regular', respawnTime = 12, respawnWindow = 9, added_by){
     const respawnTimeMs = respawnTime * 60 * 60 * 1000
+    const isEpic = 'epic' === type
+    const isSubclass = 'subclass' === type
+    const isRegular = 'regular' === type
 
     await db.query(`
-      INSERT INTO raid_boss_catalog (raid_name, type, timer_ms, window_hours, added_by)
-      VALUES ($1, $2, $3, $4, $5)
-    `, [bossName, type, respawnTimeMs, respawnWindow, added_by])
+      INSERT INTO raid_boss_catalog (raid_name, timer_ms, window_hours, added_by, server_id, is_epic, is_subclass, is_regular)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [bossName, respawnTimeMs, respawnWindow, added_by, serverId, isEpic, isSubclass, isRegular])
 
     return message.reply(
       `${capitalize(bossName)} (${respawnTime}h + ${respawnWindow}h random) has been added to the ${type !== 'regular' ? type : ''} list.`
     )
   }
 
+  // !rbremove - remove bosses
   if(command === '!rbremove'){
     if(!message.member.permissions.has(PermissionsBitField.Flags.Administrator)){
       return message.reply(`This command is only available for admins.`)
@@ -192,11 +225,12 @@ client.on(Events.MessageCreate, async (message) => {
       const raidName = args[0].toLocaleLowerCase()
       const result = await db.query(`
         DELETE FROM raid_boss_catalog
-        WHERE raid_name = $1;
-      `, [raidName])
+        WHERE raid_name = $1
+        AND server_id = $2;
+      `, [raidName, serverId])
   
       if (result.rowCount === 0){
-        return message.reply(`Unknown boss name. Use !list to check the currently tracked bosses.`)
+        return message.reply(`Unknown boss name. Use !list to check the available bosses.`)
       }
       return message.reply(`${raidName} has been removed from the list.`)
 
@@ -206,74 +240,78 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // !<boss> — get boss window
-  const boss = command.replace("!", "").toLowerCase();
-  const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1', [boss]);
-
-  if (catalog.rowCount > 0) {
-    const result = await db.query(`
-      SELECT * FROM raid_boss
-      WHERE raid_name = $1 AND server_id = $2
-    `, [boss, serverId]);
-
-    if (result.rowCount === 0) {
-      return message.reply(`No death record found for ${capitalize(boss)}.`);
-    }
-
-    const deathInfo = result.rows[0];
-    const { timer_ms, window_hours } = catalog.rows[0];
-    const deathTime = new Date(deathInfo.death_time);
-    const respawnStart = new Date(deathTime.getTime() + timer_ms);
-    const respawnEnd = new Date(respawnStart.getTime() + window_hours * 60 * 60 * 1000);
-    const now = new Date();
-
-    if (now >= respawnStart && now <= respawnEnd) {
-      const minutesLeft = Math.floor((respawnEnd - now) / 60000);
-      const hours = Math.floor(minutesLeft / 60);
-      const mins = minutesLeft % 60;
-      return message.reply(
-        `**${capitalize(boss)} is currently within spawn window!**\nRemaining time: ${hours}h ${mins}m.\nU: ${deathInfo.user_name}.`
-      );
-    } else if (now < respawnStart) {
-      return message.reply(
-        `${capitalize(boss)} window starts <t:${Math.floor(respawnStart.getTime() / 1000)}:F> (+${window_hours} random). U: ${deathInfo.user_name}.`
-      );
-    } else {
-      return message.reply(
-        `${capitalize(boss)} TOD: <t:${Math.floor(respawnEnd.getTime() / 1000)}:F>. U: ${deathInfo.user_name}.`
-      );
+  if(command.startsWith("!") && !['!help', '!list', '!rb', '!epic', '!sub', '!dead', '!update', '!rbadd', '!rbremove'].includes(command)){
+    const boss = command.replace("!", "").toLowerCase();
+    const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1 AND server_id = $2', [boss, serverId]);
+  
+    if (catalog.rowCount > 0) {
+      const result = await db.query(`
+        SELECT * FROM raid_boss
+        WHERE raid_name = $1 
+        AND server_id = $2;
+      `, [boss, serverId]);
+  
+      if (result.rowCount === 0) {
+        return message.reply(`No death record found for ${capitalize(boss)}.`);
+      }
+  
+      const deathInfo = result.rows[0];
+      const { timer_ms, window_hours } = catalog.rows[0];
+      const deathTime = new Date(deathInfo.death_time);
+      const respawnStart = new Date(deathTime.getTime() + timer_ms);
+      const respawnEnd = new Date(respawnStart.getTime() + window_hours * 60 * 60 * 1000);
+      const now = new Date();
+  
+      if (now >= respawnStart && now <= respawnEnd) {
+        const minutesLeft = Math.floor((respawnEnd - now) / 60000);
+        const hours = Math.floor(minutesLeft / 60);
+        const mins = minutesLeft % 60;
+        return message.reply(
+          `**${capitalize(boss)} is currently within spawn window!**\nRemaining time: ${hours}h ${mins}m.\nU: ${deathInfo.user_name}.`
+        );
+      } else if (now < respawnStart) {
+        return message.reply(
+          `${capitalize(boss)} window starts <t:${Math.floor(respawnStart.getTime() / 1000)}:F> (+${window_hours} random). U: ${deathInfo.user_name}.`
+        );
+      } else {
+        return message.reply(
+          `${capitalize(boss)} TOD: <t:${Math.floor(respawnEnd.getTime() / 1000)}:F>. U: ${deathInfo.user_name}.`
+        );
+      }
     }
   }
 
   // !help — list of available commands
-if (command === '!help') {
-  let reply = `
-**Raid Bot Commands:**
+  if (command === '!help') {
+    let reply = `
+    **Raid Bot Commands:**
 
-•  \`!rb\` - Lists all tracked **regular** bosses on your server *(only shows those within or approaching their spawn window)*
-•  \`!epic\` - Lists all tracked **epic** bosses *(same)*
-•  \`!sub\` - Lists all tracked **subclass** bosses *(same; baium and barakiel are listed here)*
-•  \`!{boss_name}\` - Check the spawn window of a specific boss (Example: \`!baium\`)
-•  \`!dead {boss_name}\` - Mark a boss as dead (Example: \`!dead antharas\`)
-•  \`!update {boss_name} YYYY-MM-DD HH:MM\` - Update a boss death time in **UTC-0** (Example: \`!update golkonda 2025-04-12 18:30\`)
-•  \`!list\` - Returns a list of all bosses that can be tracked
-•  \`!rbadd {bossName} {type} {respawnTimeHours} {windowHours}\` - Add a new boss (type, respawn and window are mandatory for epic/subclass only)
-•  \`!rbremove {bossName}\` - Remove a boss from the list (**admin only**)
+    •  \`!rb\` - Lists all tracked **regular** bosses *(only shows those within or approaching their spawn window)*
+    •  \`!epic\` - Lists all tracked **epic** bosses *(same)*
+    •  \`!sub\` - Lists all tracked **subclass** bosses *(same)*
+    •  \`!{boss_name}\` - Check the spawn window of a specific boss (Ex: \`!baium\`)
+    •  \`!dead {boss_name}\` - Updates a boss' TOD (Ex: \`!dead antharas\`)
+    •  \`!update {boss_name} YYYY-MM-DD HH:MM\` - Update a boss TOD **USE UTC-0** (Ex: \`!update golkonda 2025-04-12 18:30\`)
+    •  \`!list\` - Returns a list of all registered bosses
+    •  \`!rbadd {bossName} {type} {respawnTimeHours} {windowHours}\` - Add a new boss to the list (type, respawn and window are mandatory for epic and subclass only)
+    •  \`!rbremove {bossName}\` - Remove a boss from the list (**admin only**)
 
-All tracked times are:
-•  **Localized to your Discord’s local time**
-•  Labeled with who last updated them
-`;
+    All tracked times are:
+    •  **Localized to your Discord’s local time**
+    •  Labeled with who last updated them
+    `;
 
-  return message.reply(reply);
-}
+    return message.reply(reply);
+  }
 
   // !list - list of bosses that the bot can track
   if(command === '!list'){
     const results = await db.query(`
       SELECT rb.raid_name, rb.window_hours
       FROM raid_boss_catalog rb
-      ORDER BY raid_name
-    `)
+      WHERE rb.server_id = $1
+      ORDER BY rb.raid_name
+    `, [serverId])
 
     if (results.rowCount === 0){
       return message.reply("No raid boss information currently available.")
