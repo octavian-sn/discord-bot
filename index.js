@@ -275,7 +275,7 @@ client.on(Events.MessageCreate, async (message) => {
         );
       } else {
         return message.reply(
-          `${capitalize(boss)} TOD: <t:${Math.floor(respawnEnd.getTime() / 1000)}:F>. U: ${deathInfo.user_name}.`
+          `${capitalize(boss)} TOD info OUTDATED: <t:${Math.floor(respawnEnd.getTime() / 1000)}:F>. U: ${deathInfo.user_name}.`
         );
       }
     }
