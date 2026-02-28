@@ -29,12 +29,33 @@ client.on(Events.MessageCreate, async (message) => {
     const now = new Date();
     const user = message.author.username;
 
-    await db.query(`
-      INSERT INTO raid_boss (raid_name, server_id, death_time, user_name)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (raid_name, server_id)
-      DO UPDATE SET death_time = $3, user_name = $4, updated_at = NOW()
-    `, [boss, serverId, now, user]);
+    const dbClient = await db.connect();
+    try {
+      await dbClient.query('BEGIN');
+
+      await insertSpawnTrackingIfNeeded(dbClient, {
+        boss,
+        serverId,
+        serverName: message.guild.name,
+        deathTime: now,
+        timerMs: catalog.rows[0].timer_ms
+      });
+
+      await dbClient.query(`
+        INSERT INTO raid_boss (raid_name, server_id, death_time, user_name)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (raid_name, server_id)
+        DO UPDATE SET death_time = $3, user_name = $4, updated_at = NOW()
+      `, [boss, serverId, now, user]);
+
+      await dbClient.query('COMMIT');
+
+    } catch (e) {
+      await dbClient.query('ROLLBACK');
+      return message.reply(`There was an issue updating the boss timer: ${e.message}`);
+    } finally {
+      dbClient.release();
+    }
 
     const respawnStart = new Date(now.getTime() + catalog.rows[0].timer_ms);
 
@@ -59,12 +80,32 @@ client.on(Events.MessageCreate, async (message) => {
 
     const user = message.author.username;
 
-    await db.query(`
-      INSERT INTO raid_boss (raid_name, server_id, death_time, user_name)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (raid_name, server_id)
-      DO UPDATE SET death_time = $3, user_name = $4, updated_at = NOW()
-    `, [boss, serverId, newTime, user]);
+    const dbClient = await db.connect();
+    try {
+      await dbClient.query('BEGIN');
+
+      await insertSpawnTrackingIfNeeded(dbClient, {
+        boss,
+        serverId,
+        serverName: message.guild.name,
+        deathTime: newTime,
+        timerMs: catalog.rows[0].timer_ms
+      });
+
+      await dbClient.query(`
+        INSERT INTO raid_boss (raid_name, server_id, death_time, user_name)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (raid_name, server_id)
+        DO UPDATE SET death_time = $3, user_name = $4, updated_at = NOW()
+      `, [boss, serverId, newTime, user]);
+
+      await dbClient.query('COMMIT');
+    } catch (e) {
+      await dbClient.query('ROLLBACK');
+      return message.reply(`There was an issue updating the boss timer: ${e.message}`);
+    } finally {
+      dbClient.release();
+    }
 
     const respawnStart = new Date(newTime.getTime() + catalog.rows[0].timer_ms);
 
@@ -74,20 +115,75 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // !epic/!sub/!rb — tracked bosses
-  switch(command){
-    case '!epic': 
+  switch (command) {
+    case '!epic':
       return returnTrackedBosses(message, 'epic');
-    case '!sub': 
+    case '!sub':
       return returnTrackedBosses(message, 'subclass');
     case '!rb':
       return returnTrackedBosses(message, 'regular')
   }
 
+  async function insertSpawnTrackingIfNeeded(dbClient, { boss, serverId, serverName, deathTime, timerMs }) {
+    if (boss !== 'qa' && boss !== 'orfen') {
+      return;
+    }
+
+    const raidBossResult = await dbClient.query(
+      `SELECT death_time FROM raid_boss WHERE raid_name = $1 AND server_id = $2`,
+      [boss, serverId]
+    );
+
+    const previousDeathTime = raidBossResult.rows[0]?.death_time ? new Date(raidBossResult.rows[0].death_time) : null;
+    if (!previousDeathTime) {
+      return;
+    }
+
+    const startTime = new Date(previousDeathTime.getTime() + Number(timerMs));
+    const spawnTime = new Date(deathTime.getTime() - 30000);
+    const windowDiffMs = spawnTime.getTime() - startTime.getTime();
+    const spawnDiffMs = spawnTime.getTime() - previousDeathTime.getTime();
+
+    await dbClient.query(`
+      INSERT INTO raid_boss_spawn_tracking (
+        raid_name,
+        server_id,
+        server_name,
+        start_time,
+        spawn_time,
+        window_interval,
+        spawn_interval
+      )
+      VALUES ($1, $2::bigint, $3, $4, $5, $6::interval, $7::interval)
+    `, [
+      boss,
+      serverId,
+      serverName,
+      startTime,
+      spawnTime,
+      formatIntervalAsHoursMinutes(windowDiffMs),
+      formatIntervalAsHoursMinutes(spawnDiffMs)
+    ]);
+  }
+
+  function formatIntervalAsHoursMinutes(diffMs) {
+    if (!Number.isFinite(diffMs) || diffMs < 0) {
+      return null;
+    }
+
+    const totalSeconds = Math.floor(diffMs / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    return `${hours} hours ${minutes} minutes ${seconds} seconds`;
+  }
+
   async function returnTrackedBosses(message, type) {
-    const tracked = await getTrackedBosses(serverId, { 
-      isRegular : type === 'regular',
-      isEpic : type === 'epic', 
-      isSubclass : type === 'subclass'
+    const tracked = await getTrackedBosses(serverId, {
+      isRegular: type === 'regular',
+      isEpic: type === 'epic',
+      isSubclass: type === 'subclass'
     });
 
     if (tracked.rowCount === 0) {
@@ -102,22 +198,22 @@ client.on(Events.MessageCreate, async (message) => {
       const now = new Date();
       const formattedStart = `<t:${Math.floor(respawnStart.getTime() / 1000)}:F>`;
       const formattedEnd = `<t:${Math.floor(respawnEnd.getTime() / 1000)}:F>`;
-      if(now > respawnEnd){
+      if (now > respawnEnd) {
         outdatedBosses += `• **${capitalize(row.raid_name)}** - ended ${formattedEnd}\n`;
-      } else if(respawnStart <= now && now <= respawnEnd){
+      } else if (respawnStart <= now && now <= respawnEnd) {
         const minutesLeft = Math.floor((respawnEnd - now) / 60000);
         const hours = Math.floor(minutesLeft / 60);
         const mins = minutesLeft % 60;
         reply += `• **${capitalize(row.raid_name)}** - ON! Window ends in ${hours}h ${mins}m\n`;
-      } else{
+      } else {
         reply += `• **${capitalize(row.raid_name)}** - starts ${formattedStart}\n`;
       }
     });
 
-    return message.reply( reply + outdatedBosses );
+    return message.reply(reply + outdatedBosses);
   }
 
-  async function getTrackedBosses(serverId, {isRegular = false, isEpic = false, isSubclass = false} = {}){
+  async function getTrackedBosses(serverId, { isRegular = false, isEpic = false, isSubclass = false } = {}) {
     let query = `
     SELECT rb.*, c.timer_ms, c.window_hours
     FROM raid_boss rb
@@ -128,7 +224,7 @@ client.on(Events.MessageCreate, async (message) => {
     `
     const values = [serverId]
 
-    if (isRegular){
+    if (isRegular) {
       query += ` 
         AND c.is_regular IS TRUE
         AND NOW() < 
@@ -137,10 +233,10 @@ client.on(Events.MessageCreate, async (message) => {
           + (c.window_hours * INTERVAL '1 hour')
       `;
     }
-    if (isEpic){
+    if (isEpic) {
       query += ` AND c.is_epic IS TRUE`
     }
-    if (isSubclass){
+    if (isSubclass) {
       query += ` AND c.is_subclass IS TRUE`
     }
 
@@ -154,37 +250,37 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // !rbadd - add bosses
-  if (command === '!rbadd'){
+  if (command === '!rbadd') {
     const [bossName, type, respawnTime, respawnWindow] = args;
     const user = message.author.username;
 
     if (!bossName) {
-     return message.reply("Usage: !rbadd {bossName} {type} {respawnTimeHours} {windowHours}\nExample: !rbadd tezza epic 72 4");
+      return message.reply("Usage: !rbadd {bossName} {type} {respawnTimeHours} {windowHours}\nExample: !rbadd tezza epic 72 4");
     }
     const lowerCaseBossName = bossName.toLocaleLowerCase()
 
     if (type && (type !== 'epic' && type !== 'subclass' && type !== 'regular')) {
       return message.reply(`Invalid type. Must be either epic or subclass.`);
     }
-    if (type && (!respawnTime || !respawnWindow)){
+    if (type && (!respawnTime || !respawnWindow)) {
       return message.reply('For epic and subclass bosses a respawn time and window must be provided. \nExample: !rbadd tezza epic 72 4')
     }
     if (respawnTime < 1 || respawnTime > 999 || respawnWindow < 1 || respawnWindow > 9) {
       return message.reply("Respawn time must be between 1 and 999. Window hours must be between 1 and 9.")
     }
 
-    try{
+    try {
       await addNewServer(serverId);
       return await addNewRaidBoss(lowerCaseBossName, type, respawnTime, respawnWindow, user);
-    }catch(e){
-      if(e.message.includes('duplicate key value')){
+    } catch (e) {
+      if (e.message.includes('duplicate key value')) {
         return message.reply(`Duplicate entry detected. ${bossName} already exists.`)
       }
       return message.reply(`There was an issue adding a new rb to the list of tracked raid bosses: ${e.message}`)
     }
   }
 
-  async function addNewServer(serverId){
+  async function addNewServer(serverId) {
     const serverName = message.guild.name;
     const ownerId = (await message.guild.fetchOwner()).id;
 
@@ -194,12 +290,12 @@ client.on(Events.MessageCreate, async (message) => {
       ON CONFLICT (server_id) DO NOTHING
     `, [serverId, serverName, ownerId])
 
-    if (result.rowCount > 0){
+    if (result.rowCount > 0) {
       console.info(`New server ${serverId} has been added. O: ${ownerId}`)
     }
   }
 
-  async function addNewRaidBoss(bossName, type = 'regular', respawnTime = 12, respawnWindow = 9, added_by){
+  async function addNewRaidBoss(bossName, type = 'regular', respawnTime = 12, respawnWindow = 9, added_by) {
     const respawnTimeMs = respawnTime * 60 * 60 * 1000
     const isEpic = 'epic' === type
     const isSubclass = 'subclass' === type
@@ -216,52 +312,59 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // !rbremove - remove bosses
-  if(command === '!rbremove'){
-    if(!message.member.permissions.has(PermissionsBitField.Flags.Administrator)){
+  if (command === '!rbremove') {
+    const isCreator = message.author.id === "400720504807227393";
+    const isAdmin = message.member?.permissions.has(PermissionsBitField.Flags.Administrator);
+
+    if (!isCreator && !isAdmin) {
       return message.reply(`This command is only available for admins.`)
     }
 
-    try{
+    if (!args[0]) {
+      return message.reply(`Usage: !rbremove {bossName}`);
+    }
+
+    try {
       const raidName = args[0].toLocaleLowerCase()
       const result = await db.query(`
         DELETE FROM raid_boss_catalog
         WHERE raid_name = $1
         AND server_id = $2;
       `, [raidName, serverId])
-  
-      if (result.rowCount === 0){
+
+      if (result.rowCount === 0) {
         return message.reply(`Unknown boss name. Use !list to check the available bosses.`)
       }
       return message.reply(`${raidName} has been removed from the list.`)
 
-    }catch(e){
+    } catch (e) {
       return message.reply(`There was an issue removing the rb from the tracked list: ${e.message}`)
     }
   }
 
   // !<boss> — get boss window
-  if(command.startsWith("!") && !['!help', '!list', '!rb', '!epic', '!sub', '!dead', '!update', '!rbadd', '!rbremove'].includes(command)){
+  if (command.startsWith("!") && !['!help', '!list', '!rb', '!epic', '!sub', '!dead', '!update', '!rbadd', '!rbremove'].includes(command)) {
     const boss = command.replace("!", "").toLowerCase();
     const catalog = await db.query('SELECT * FROM raid_boss_catalog WHERE raid_name = $1 AND server_id = $2', [boss, serverId]);
-  
+
     if (catalog.rowCount > 0) {
       const result = await db.query(`
         SELECT * FROM raid_boss
         WHERE raid_name = $1 
         AND server_id = $2;
       `, [boss, serverId]);
-  
+
       if (result.rowCount === 0) {
         return message.reply(`No death record found for ${capitalize(boss)}.`);
       }
-  
+
       const deathInfo = result.rows[0];
       const { timer_ms, window_hours } = catalog.rows[0];
       const deathTime = new Date(deathInfo.death_time);
       const respawnStart = new Date(deathTime.getTime() + timer_ms);
       const respawnEnd = new Date(respawnStart.getTime() + window_hours * 60 * 60 * 1000);
       const now = new Date();
-  
+
       if (now >= respawnStart && now <= respawnEnd) {
         const minutesLeft = Math.floor((respawnEnd - now) / 60000);
         const hours = Math.floor(minutesLeft / 60);
@@ -305,7 +408,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // !list - list of bosses that the bot can track
-  if(command === '!list'){
+  if (command === '!list') {
     const results = await db.query(`
       SELECT rb.raid_name, rb.window_hours
       FROM raid_boss_catalog rb
@@ -313,15 +416,15 @@ client.on(Events.MessageCreate, async (message) => {
       ORDER BY rb.raid_name
     `, [serverId])
 
-    if (results.rowCount === 0){
+    if (results.rowCount === 0) {
       return message.reply("No raid boss information currently available.")
     }
 
-    let reply = "**Raid Boss list (Name - x hours respawn window)**\n\n" 
-    results.rows.forEach(row=>{
+    let reply = "**Raid Boss list (Name - x hours respawn window)**\n\n"
+    results.rows.forEach(row => {
       reply += `• ${capitalize(row.raid_name)} - ${row.window_hours}\n`
     })
-    
+
     return message.reply(reply)
   }
 

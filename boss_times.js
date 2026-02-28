@@ -1,4 +1,4 @@
-
+// For reference only, not used in code
 bossConfigs = {
     qa: { timer: 24 * 60 * 60 * 1000, window: 4 },
     core: { timer: 48 * 60 * 60 * 1000, window: 4 },
